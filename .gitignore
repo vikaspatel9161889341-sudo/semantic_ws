@@ -1,0 +1,26 @@
+# ROS 2 Build Artifacts
+build/
+install/
+log/
+
+# Python Virtual Environments & Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+
+# C++ Object Files
+*.o
+*.obj
+*.so
+*.dylib
+*.a
+*.lib
+
+# IDE & OS Files
+.vscode/
+.idea/
+.DS_Store
