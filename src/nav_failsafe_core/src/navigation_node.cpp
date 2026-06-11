@@ -1,5 +1,6 @@
 #include "rclcpp/rclcpp.hpp"
-#include "px4_msgs/msg/battery_status.hpp"  // 🔋 PX4 Battery Message Header
+#include "px4_msgs/msg/battery_status.hpp"
+#include "px4_msgs/msg/vehicle_local_position.hpp" // 🛸 PX4 Local Position Header
 #include <vector>
 #include <queue>
 #include <cmath>
@@ -30,30 +31,38 @@ struct AStarNode {
 class NavigationFailsafeNode : public rclcpp::Node {
 public:
     NavigationFailsafeNode() : Node("nav_failsafe_node") {
-        RCLCPP_INFO(this->get_logger(), "🚀 3D A* Node with Real PX4 Telemetry Initialized!");
+        RCLCPP_INFO(this->get_logger(), "🚀 3D A* Node with Full PX4 Telemetry Initialized!");
 
-        // 🛜 PX4 Battery Topic Subscriber Setup (SensorDataQoS standard hota hai PX4 ke liye)
+        // 🛜 1. Battery Subscriber
         battery_sub_ = this->create_subscription<px4_msgs::msg::BatteryStatus>(
             "/fmu/out/battery_status", rclcpp::SensorDataQoS(),
             std::bind(&NavigationFailsafeNode::battery_callback, this, std::placeholders::_1));
 
-        // 10Hz Supervisor Timer (Har 100ms mein health check karega)
+        // 🛜 2. Local Position Subscriber
+        position_sub_ = this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+            "/fmu/out/vehicle_local_position", rclcpp::SensorDataQoS(),
+            std::bind(&NavigationFailsafeNode::position_callback, this, std::placeholders::_1));
+
+        // 10Hz Supervisor Timer
         supervisor_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(100), std::bind(&NavigationFailsafeNode::supervisor_loop, this));
 
-        start_pos = {0, 0, 0};
-        goal_pos = {4, 4, 2};
-
-        // Initial path planning
-        run_3d_a_star(start_pos, goal_pos);
+        start_pos = {0, 0, 0}; // Home Base
+        current_drone_pos = {0, 0, 0}; // Default start position
     }
 
 private:
-    // 🔋 Battery Callback Function
+    // 🔋 Battery Callback
     void battery_callback(const px4_msgs::msg::BatteryStatus::SharedPtr msg) {
-        // PX4 'remaining' range 0.0 (khali) se 1.0 (full) ke beech deta hai. 
-        // Ise percentage mein badalne ke liye 100 se multiply karenge.
         battery_level = msg->remaining * 100.0;
+    }
+
+    // 🛸 Position Callback (Live 3D Coordinates Tracking)
+    void position_callback(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
+        // Float values ko round karke hamare integer Point3D grid mein convert kar rahe hain
+        current_drone_pos.x = std::round(msg->x);
+        current_drone_pos.y = std::round(msg->y);
+        current_drone_pos.z = std::round(-msg->z); // NED to NEU (Negative Z ko Positive Height banaya)
     }
 
     bool is_obstacle(Point3D p) {
@@ -116,36 +125,38 @@ private:
         final_path.push_back(start);
         std::reverse(final_path.begin(), final_path.end());
 
-        RCLCPP_INFO(this->get_logger(), "📍 Generated Path:");
+        RCLCPP_INFO(this->get_logger(), "🚨 EMERGENCY RETURN PATH GENERATED:");
         for (const auto& wp : final_path) {
-            RCLCPP_INFO(this->get_logger(), "   -> Waypoint: [%d, %d, %d]", wp.x, wp.y, wp.z);
+            RCLCPP_INFO(this->get_logger(), "   -> [X: %d, Y: %d, Z: %d]", wp.x, wp.y, wp.z);
         }
     }
 
-    // ⏱️ 10Hz Supervisor Loop (Ab yeh live data check karega)
+    // ⏱️ 10Hz Supervisor Loop
     void supervisor_loop() {
         if (failsafe_triggered) return;
 
-        // Print battery level regularly for debugging
-        RCLCPP_INFO(this->get_logger(), "🔋 Live Battery Level: %.1f%%", battery_level);
+        // Log logs for clarity
+        RCLCPP_INFO(this->get_logger(), "📊 Status -> Batt: %.1f%% | Pos: [%d, %d, %d]", 
+                    battery_level, current_drone_pos.x, current_drone_pos.y, current_drone_pos.z);
 
-        // Agar live telemetry 20% ya usse kam bataye, toh Bingo Fuel Trigger!
         if (battery_level <= 20.0) {
             failsafe_triggered = true;
-            RCLCPP_WARN(this->get_logger(), "⚠️ BINGO FUEL DETECTED BY PX4! Battery at %.1f%%", battery_level);
-            RCLCPP_WARN(this->get_logger(), "🚨 Failsafe Active! Emergency Return to Home [0,0,0]...");
+            RCLCPP_WARN(this->get_logger(), "⚠️ BINGO FUEL DETECTED! Battery: %.1f%%", battery_level);
+            RCLCPP_WARN(this->get_logger(), "🚨 Initiating A* Return-to-Home from live position!");
             
-            Point3D current_drone_pos = {1, 3, 1}; // Dummy current position for now
+            // Asli current position se ghar (start_pos) ka rasta plan karein
             run_3d_a_star(current_drone_pos, start_pos);
         }
     }
 
     rclcpp::Subscription<px4_msgs::msg::BatteryStatus>::SharedPtr battery_sub_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr position_sub_;
     rclcpp::TimerBase::SharedPtr supervisor_timer_;
-    Point3D start_pos;
-    Point3D goal_pos;
     
-    float battery_level = 100.0; // Default full jab tak data na aaye
+    Point3D start_pos;
+    Point3D current_drone_pos;
+    
+    float battery_level = 100.0;
     bool failsafe_triggered = false;
 };
 
