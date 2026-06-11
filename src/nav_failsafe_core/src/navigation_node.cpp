@@ -1,6 +1,8 @@
 #include "rclcpp/rclcpp.hpp"
 #include "px4_msgs/msg/battery_status.hpp"
-#include "px4_msgs/msg/vehicle_local_position.hpp" // 🛸 PX4 Local Position Header
+#include "px4_msgs/msg/vehicle_local_position.hpp"
+#include "px4_msgs/msg/offboard_control_mode.hpp" // 📡 Offboard Heartbeat Header
+#include "px4_msgs/msg/trajectory_setpoint.hpp"    // 🛸 Actuation Command Header
 #include <vector>
 #include <queue>
 #include <cmath>
@@ -31,38 +33,40 @@ struct AStarNode {
 class NavigationFailsafeNode : public rclcpp::Node {
 public:
     NavigationFailsafeNode() : Node("nav_failsafe_node") {
-        RCLCPP_INFO(this->get_logger(), "🚀 3D A* Node with Full PX4 Telemetry Initialized!");
+        RCLCPP_INFO(this->get_logger(), "🚀 Fully Actuated 3D A* Offboard Node Initialized!");
 
-        // 🛜 1. Battery Subscriber
+        // 🛜 Subscribers Setup
         battery_sub_ = this->create_subscription<px4_msgs::msg::BatteryStatus>(
             "/fmu/out/battery_status", rclcpp::SensorDataQoS(),
             std::bind(&NavigationFailsafeNode::battery_callback, this, std::placeholders::_1));
 
-        // 🛜 2. Local Position Subscriber
         position_sub_ = this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
             "/fmu/out/vehicle_local_position", rclcpp::SensorDataQoS(),
             std::bind(&NavigationFailsafeNode::position_callback, this, std::placeholders::_1));
 
-        // 10Hz Supervisor Timer
+        // 📡 Publishers Setup (PX4 Actuation)
+        offboard_control_mode_pub_ = this->create_publisher<px4_msgs::msg::OffboardControlMode>(
+            "/fmu/in/offboard_control_mode", 10);
+        trajectory_setpoint_pub_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
+            "/fmu/in/trajectory_setpoint", 10);
+
+        // 10Hz Supervisor & Actuation Loop
         supervisor_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(100), std::bind(&NavigationFailsafeNode::supervisor_loop, this));
 
         start_pos = {0, 0, 0}; // Home Base
-        current_drone_pos = {0, 0, 0}; // Default start position
+        current_drone_pos = {0, 0, 0};
     }
 
 private:
-    // 🔋 Battery Callback
     void battery_callback(const px4_msgs::msg::BatteryStatus::SharedPtr msg) {
         battery_level = msg->remaining * 100.0;
     }
 
-    // 🛸 Position Callback (Live 3D Coordinates Tracking)
     void position_callback(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
-        // Float values ko round karke hamare integer Point3D grid mein convert kar rahe hain
         current_drone_pos.x = std::round(msg->x);
         current_drone_pos.y = std::round(msg->y);
-        current_drone_pos.z = std::round(-msg->z); // NED to NEU (Negative Z ko Positive Height banaya)
+        current_drone_pos.z = std::round(-msg->z); // NED to NEU conversion
     }
 
     bool is_obstacle(Point3D p) {
@@ -84,11 +88,15 @@ private:
         open_list.push({start, start, 0.0, get_heuristic(start, goal)});
         best_g_cost[start] = 0.0;
 
+        calculated_path.clear();
+
         while (!open_list.empty()) {
             AStarNode current = open_list.top();
             open_list.pop();
 
+            // 🎯 GOAL CHECK
             if (current.point == goal) {
+                travel_history[current.point] = current.parent; // 👈 YEH VALI LINE ADD KARNI HAI!
                 trace_final_path(travel_history, start, goal);
                 return;
             }
@@ -115,49 +123,99 @@ private:
     }
 
     void trace_final_path(std::map<Point3D, Point3D>& history, Point3D start, Point3D goal) {
-        std::vector<Point3D> final_path;
         Point3D curr = goal;
-
         while (!(curr == start)) {
-            final_path.push_back(curr);
+            calculated_path.push_back(curr);
             curr = history[curr];
         }
-        final_path.push_back(start);
-        std::reverse(final_path.begin(), final_path.end());
+        calculated_path.push_back(start);
+        std::reverse(calculated_path.begin(), calculated_path.end());
 
-        RCLCPP_INFO(this->get_logger(), "🚨 EMERGENCY RETURN PATH GENERATED:");
-        for (const auto& wp : final_path) {
-            RCLCPP_INFO(this->get_logger(), "   -> [X: %d, Y: %d, Z: %d]", wp.x, wp.y, wp.z);
-        }
+        RCLCPP_INFO(this->get_logger(), "📍 A* Waypoint Queue Loaded! Total Steps: %zu", calculated_path.size());
     }
 
-    // ⏱️ 10Hz Supervisor Loop
+    // 📡 Offboard Mode Heartbeat Publish Karne Ka Function
+    void publish_offboard_control_mode() {
+        px4_msgs::msg::OffboardControlMode msg;
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        msg.position = true; // Hum drone ko position command de rahe hain
+        msg.velocity = false;
+        msg.acceleration = false;
+        msg.attitude = false;
+        msg.body_rate = false;
+        offboard_control_mode_pub_->publish(msg);
+    }
+
+    // 🛸 Target Waypoint par Drone ko Fly karwane ka Function
+    void publish_trajectory_setpoint(Point3D target) {
+        px4_msgs::msg::TrajectorySetpoint msg;
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+        msg.position[0] = target.x;
+        msg.position[1] = target.y;
+        msg.position[2] = -target.z; // NEU grid se wapas PX4 ke standard negative NED Z mein convert kiya
+        msg.yaw = -3.14; // Face home
+        trajectory_setpoint_pub_->publish(msg);
+    }
+
+    // ⏱️ 10Hz Supervisor & Execution Loop
     void supervisor_loop() {
-        if (failsafe_triggered) return;
+        // 1. Live telemetry logs print karein jab tak failsafe normal hai
+        if (!failsafe_triggered) {
+            RCLCPP_INFO(this->get_logger(), "📊 Status -> Batt: %.1f%% | Pos: [%d, %d, %d]", 
+                        battery_level, current_drone_pos.x, current_drone_pos.y, current_drone_pos.z);
+        }
 
-        // Log logs for clarity
-        RCLCPP_INFO(this->get_logger(), "📊 Status -> Batt: %.1f%% | Pos: [%d, %d, %d]", 
-                    battery_level, current_drone_pos.x, current_drone_pos.y, current_drone_pos.z);
-
-        if (battery_level <= 20.0) {
+        // 2. Battery Low Trigger Check
+        if (battery_level <= 20.0 && !failsafe_triggered) {
             failsafe_triggered = true;
-            RCLCPP_WARN(this->get_logger(), "⚠️ BINGO FUEL DETECTED! Battery: %.1f%%", battery_level);
-            RCLCPP_WARN(this->get_logger(), "🚨 Initiating A* Return-to-Home from live position!");
-            
-            // Asli current position se ghar (start_pos) ka rasta plan karein
+            path_following_active = true;
+            current_wp_idx = 0;
+            RCLCPP_WARN(this->get_logger(), "⚠️ BINGO FUEL DETECTED! Initiating Emergency Return-to-Home...");
             run_3d_a_star(current_drone_pos, start_pos);
         }
+
+        // 3. Offboard Command Execution Engine
+        if (path_following_active) {
+            publish_offboard_control_mode(); // Heartbeat bhejna compulsory hai
+
+            if (current_wp_idx < calculated_path.size()) {
+                Point3D target_wp = calculated_path[current_wp_idx];
+                double distance = get_heuristic(current_drone_pos, target_wp);
+
+                // Agar target waypoint ke paas (0.8m) pahunch gaye, toh agle par badhein
+                if (distance < 0.8) {
+                    RCLCPP_INFO(this->get_logger(), "🎯 Reached Waypoint %zu! Moving to next point...", current_wp_idx);
+                    current_wp_idx++;
+                } else {
+                    // Live coordinate setpoint publish karein taaki drone physical move kare
+                    publish_trajectory_setpoint(target_wp);
+                    RCLCPP_INFO(this->get_logger(), "🛸 Flying to WP [%d, %d, %d] | Distance Left: %.2fm", 
+                                target_wp.x, target_wp.y, target_wp.z, distance);
+                }
+            } else {
+                // Saare waypoints khatam = Drone ghar pahunch gaya!
+                RCLCPP_INFO(this->get_logger(), "🎉 DRONE SAFELY RETURNED TO HOME BASE! Landing Sequence Engaged.");
+                path_following_active = false;
+            }
+        }
     }
 
+    // ROS2 Comms Components
     rclcpp::Subscription<px4_msgs::msg::BatteryStatus>::SharedPtr battery_sub_;
     rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr position_sub_;
+    rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_control_mode_pub_;
+    rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
     rclcpp::TimerBase::SharedPtr supervisor_timer_;
     
+    // Logic Variables
     Point3D start_pos;
     Point3D current_drone_pos;
+    std::vector<Point3D> calculated_path;
+    size_t current_wp_idx = 0;
     
     float battery_level = 100.0;
     bool failsafe_triggered = false;
+    bool path_following_active = false;
 };
 
 int main(int argc, char **argv) {
