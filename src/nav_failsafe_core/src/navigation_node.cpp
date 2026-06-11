@@ -1,4 +1,5 @@
 #include "rclcpp/rclcpp.hpp"
+#include "px4_msgs/msg/battery_status.hpp"  // 🔋 PX4 Battery Message Header
 #include <vector>
 #include <queue>
 #include <cmath>
@@ -29,20 +30,32 @@ struct AStarNode {
 class NavigationFailsafeNode : public rclcpp::Node {
 public:
     NavigationFailsafeNode() : Node("nav_failsafe_node") {
-        RCLCPP_INFO(this->get_logger(), "🚀 3D A* Node with Failsafe Supervisor Initialized!");
+        RCLCPP_INFO(this->get_logger(), "🚀 3D A* Node with Real PX4 Telemetry Initialized!");
 
-        // 10Hz Supervisor Timer (Har 100ms yaani 0.1s mein chalega)
+        // 🛜 PX4 Battery Topic Subscriber Setup (SensorDataQoS standard hota hai PX4 ke liye)
+        battery_sub_ = this->create_subscription<px4_msgs::msg::BatteryStatus>(
+            "/fmu/out/battery_status", rclcpp::SensorDataQoS(),
+            std::bind(&NavigationFailsafeNode::battery_callback, this, std::placeholders::_1));
+
+        // 10Hz Supervisor Timer (Har 100ms mein health check karega)
         supervisor_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(100), std::bind(&NavigationFailsafeNode::supervisor_loop, this));
 
         start_pos = {0, 0, 0};
         goal_pos = {4, 4, 2};
 
-        // Pehla normal path plan karein
+        // Initial path planning
         run_3d_a_star(start_pos, goal_pos);
     }
 
 private:
+    // 🔋 Battery Callback Function
+    void battery_callback(const px4_msgs::msg::BatteryStatus::SharedPtr msg) {
+        // PX4 'remaining' range 0.0 (khali) se 1.0 (full) ke beech deta hai. 
+        // Ise percentage mein badalne ke liye 100 se multiply karenge.
+        battery_level = msg->remaining * 100.0;
+    }
+
     bool is_obstacle(Point3D p) {
         if (p.x == 2 && (p.y >= 0 && p.y <= 3) && (p.z >= 0 && p.z <= 2)) {
             return true;
@@ -79,11 +92,9 @@ private:
                         if (dx == 0 && dy == 0 && dz == 0) continue;
 
                         Point3D neighbor = {current.point.x + dx, current.point.y + dy, current.point.z + dz};
-
                         if (is_obstacle(neighbor)) continue;
 
                         double new_g_cost = current.g_cost + get_heuristic(current.point, neighbor);
-
                         if (best_g_cost.find(neighbor) == best_g_cost.end() || new_g_cost < best_g_cost[neighbor]) {
                             best_g_cost[neighbor] = new_g_cost;
                             open_list.push({neighbor, current.point, new_g_cost, get_heuristic(neighbor, goal)});
@@ -111,31 +122,30 @@ private:
         }
     }
 
-    // ⏱️ 10Hz Supervisor Loop
+    // ⏱️ 10Hz Supervisor Loop (Ab yeh live data check karega)
     void supervisor_loop() {
         if (failsafe_triggered) return;
 
-        // Drone ki battery har 0.1 second mein 0.5% kam ho rahi hai (Simulation)
-        battery_level -= 0.5;
+        // Print battery level regularly for debugging
+        RCLCPP_INFO(this->get_logger(), "🔋 Live Battery Level: %.1f%%", battery_level);
 
-        // Agar battery 20% (Bingo Fuel threshold) par aa jaye, toh failsafe lagao!
+        // Agar live telemetry 20% ya usse kam bataye, toh Bingo Fuel Trigger!
         if (battery_level <= 20.0) {
             failsafe_triggered = true;
-            RCLCPP_WARN(this->get_logger(), "⚠️ BINGO FUEL DETECTED! Battery at %.1f%%", battery_level);
-            RCLCPP_WARN(this->get_logger(), "🚨 Failsafe Triggered! Rerouting instantly to Home [0,0,0]...");
+            RCLCPP_WARN(this->get_logger(), "⚠️ BINGO FUEL DETECTED BY PX4! Battery at %.1f%%", battery_level);
+            RCLCPP_WARN(this->get_logger(), "🚨 Failsafe Active! Emergency Return to Home [0,0,0]...");
             
-            // Dummy current location se ghar (0,0,0) ka naya rasta nikalein
-            Point3D current_drone_pos = {1, 3, 1}; 
+            Point3D current_drone_pos = {1, 3, 1}; // Dummy current position for now
             run_3d_a_star(current_drone_pos, start_pos);
         }
     }
 
+    rclcpp::Subscription<px4_msgs::msg::BatteryStatus>::SharedPtr battery_sub_;
     rclcpp::TimerBase::SharedPtr supervisor_timer_;
     Point3D start_pos;
     Point3D goal_pos;
     
-    // Failsafe State Variables
-    float battery_level = 100.0; 
+    float battery_level = 100.0; // Default full jab tak data na aaye
     bool failsafe_triggered = false;
 };
 
