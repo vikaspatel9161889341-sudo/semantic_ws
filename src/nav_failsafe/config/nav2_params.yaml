@@ -1,0 +1,96 @@
+amcl:
+  ros__parameters:
+    use_sim_time: True
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: True
+      global_frame: odom
+      robot_base_frame: base_link
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      rolling_window: true
+      width: 5
+      height: 5
+      resolution: 0.1
+      robot_radius: 0.3
+      plugins: ["voxel_layer", "inflation_layer"]
+      
+      voxel_layer:
+      plugin: "spatio_temporal_voxel_layer::SpatioTemporalVoxelLayer"
+      enabled: true
+      voxel_decay: 2.0
+      decay_model: 0
+      voxel_size: 0.05
+      filtered_clear_box: true
+      max_obstacle_height: 3.0
+      mark_threshold: 0
+      observation_sources: pointcloud
+      pointcloud:
+        topic: /v4l2_camera/point_cloud
+        max_obstacle_height: 3.0
+        clearing: true
+        marking: true
+        data_type: PointCloud2
+
+    inflation_layer:
+      plugin: "nav2_costmap_2d::InflationLayer"
+      inflation_radius: 0.5
+      cost_scaling_factor: 3.0
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: True
+      global_frame: map
+      robot_base_frame: base_link
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      rolling_window: false
+      track_unknown_space: true
+      robot_radius: 0.3
+      plugins: ["static_layer", "voxel_layer", "inflation_layer"]
+      
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: True
+        
+      voxel_layer:
+        plugin: "spatio_temporal_voxel_layer::SpatioTemporalVoxelLayer"
+        enabled: true
+        voxel_decay: 5.0
+        decay_model: 0
+        voxel_size: 0.05
+        max_obstacle_height: 3.0
+        mark_threshold: 0
+        observation_sources: pointcloud
+        pointcloud:
+          topic: /v4l2_camera/point_cloud
+          max_obstacle_height: 3.0
+          clearing: true
+          marking: true
+          data_type: PointCloud2
+
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.6
+        cost_scaling_factor: 3.0
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 20.0
+    use_sim_time: True
+    planner_plugins: ["GridBased"]
+    
+    GridBased:
+      plugin: "nav2_smac_planner/SmacPlanner3D"
+      tolerance: 0.5
+      downsample_costmap: false
+      downsampling_factor: 1
+      allow_unknown: true
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 2.0
+      motion_model_for_search: "MOORE" # Omnidirectional Quadcopter Kinematics
+      cost_travel_multiplier: 2.0
