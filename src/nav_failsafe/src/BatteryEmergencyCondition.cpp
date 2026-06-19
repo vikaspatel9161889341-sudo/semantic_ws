@@ -23,7 +23,7 @@ public:
 
     // Pure PX4 Local Position Topic
     pose_sub_ = node_->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
-      "/fmu/out/vehicle_local_position", 10,
+      "/fmu/out/vehicle_local_position_v1", 10,
       [this](const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
         if (!pose_received_) {
           home_x_ = msg->x;

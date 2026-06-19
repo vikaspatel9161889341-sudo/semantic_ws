@@ -41,7 +41,7 @@ public:
             std::bind(&NavigationFailsafeNode::battery_callback, this, std::placeholders::_1));
 
         position_sub_ = this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
-            "/fmu/out/vehicle_local_position", rclcpp::SensorDataQoS(),
+            "/fmu/out/vehicle_local_position_v1", rclcpp::SensorDataQoS(),
             std::bind(&NavigationFailsafeNode::position_callback, this, std::placeholders::_1));
 
         // 📡 Publishers Setup (PX4 Actuation)
